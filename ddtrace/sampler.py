@@ -19,6 +19,7 @@ from .constants import ENV_KEY
 from .constants import SAMPLING_AGENT_DECISION
 from .constants import SAMPLING_LIMIT_DECISION
 from .constants import SAMPLING_RULE_DECISION
+from .constants import SamplingMechanism
 from .constants import USER_KEEP
 from .constants import USER_REJECT
 from .internal.compat import iteritems
@@ -50,6 +51,7 @@ KNUTH_FACTOR = 1111111111111111111
 class BaseSampler(six.with_metaclass(abc.ABCMeta)):
     @abc.abstractmethod
     def sample(self, span):
+        # type: (Span) -> bool
         pass
 
 
@@ -133,13 +135,22 @@ class RateByServiceSampler(BasePrioritySampler):
         # type: (...) -> None
         self._by_service_samplers[self._key(service, env)] = RateSampler(sample_rate)
 
-    def sample(self, span):
-        # type: (Span) -> bool
+    def _get_sampler(self, span):
+        # type: (Span) -> RateSampler
         tags = span.tracer.tags if span.tracer else {}
         env = tags[ENV_KEY] if ENV_KEY in tags else None
         key = self._key(span.service, env)
 
-        sampler = self._by_service_samplers.get(key, self._by_service_samplers[self._default_key])
+        return self._by_service_samplers.get(key, self._by_service_samplers[self._default_key])
+
+    def get_sample_rate(self, span):
+        # type: (Span) -> float
+        sampler = self._get_sampler(span)
+        return sampler.sample_rate
+
+    def sample(self, span):
+        # type: (Span) -> bool
+        sampler = self._get_sampler(span)
         span.set_metric(SAMPLING_AGENT_DECISION, sampler.sample_rate)
         return sampler.sample(span)
 
@@ -241,10 +252,11 @@ class DatadogSampler(BasePrioritySampler):
         if isinstance(self.default_sampler, RateByServiceSampler):
             self.default_sampler.update_rate_by_service_sample_rates(sample_rates)
 
-    def _set_priority(self, span, priority):
-        # type: (Span, int) -> None
+    def _set_priority(self, span, priority, mechanism, sample_rate):
+        # type: (Span, int, SamplingMechanism, float) -> None
         span.context.sampling_priority = priority
         span.sampled = priority > 0  # Positive priorities mean it was kept
+        span.context._update_upstream_services(span, priority, mechanism, sample_rate)
 
     def sample(self, span):
         # type: (Span) -> bool
@@ -270,10 +282,16 @@ class DatadogSampler(BasePrioritySampler):
             # If this is the old sampler, sample and return
             if isinstance(self.default_sampler, RateByServiceSampler):
                 if self.default_sampler.sample(span):
-                    self._set_priority(span, AUTO_KEEP)
+                    # TODO: How do we get the sample rate?
+                    self._set_priority(
+                        span, AUTO_KEEP, SamplingMechanism.AGENT, self.default_sampler.get_sample_rate(span)
+                    )
                     return True
                 else:
-                    self._set_priority(span, AUTO_REJECT)
+                    # TODO: How do we get the sample rate?
+                    self._set_priority(
+                        span, AUTO_REJECT, SamplingMechanism.AGENT, self.default_sampler.get_sample_rate(span)
+                    )
                     return False
 
             # If no rules match, use our default sampler
@@ -281,26 +299,25 @@ class DatadogSampler(BasePrioritySampler):
 
         # Sample with the matching sampling rule
         if isinstance(matching_rule, (RateSampler, SamplingRule)):
+            # TODO: We need the matching rule to know about the sample rate
             span.set_metric(SAMPLING_RULE_DECISION, matching_rule.sample_rate)
         if not matching_rule.sample(span):
-            self._set_priority(span, USER_REJECT)
+            # TODO: We need the matching rule to know about the sample rate
+            self._set_priority(span, USER_REJECT, SamplingMechanism.USER_RULE, matching_rule.sample_rate)
             return False
-        else:
-            # Do not return here, we need to apply rate limit
-            self._set_priority(span, USER_KEEP)
 
         # Ensure all allowed traces adhere to the global rate limit
         allowed = self.limiter.is_allowed()
-        # Always set the sample rate metric whether it was allowed or not
-        # DEV: Setting this allows us to properly compute metrics and debug the
-        #      various sample rates that are getting applied to this span
-        span.set_metric(SAMPLING_LIMIT_DECISION, self.limiter.effective_rate)
         if not allowed:
-            self._set_priority(span, USER_REJECT)
+            # We only need to set the rate limit metric if the limiter is rejecting the span
+            # DEV: Setting this allows us to properly compute metrics and debug the
+            #      various sample rates that are getting applied to this span
+            span.set_metric(SAMPLING_LIMIT_DECISION, self.limiter.effective_rate)
+            self._set_priority(span, USER_REJECT, SamplingMechanism.USER_RULE, self.limiter.effective_rate)
             return False
 
         # We made it by all of checks, sample this trace
-        self._set_priority(span, USER_KEEP)
+        self._set_priority(span, USER_KEEP, SamplingMechanism.USER_RULE, matching_rule.sample_rate)
         return True
 
 

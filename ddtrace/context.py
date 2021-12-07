@@ -1,3 +1,4 @@
+import base64
 import threading
 from typing import Any
 from typing import Optional
@@ -6,7 +7,11 @@ from typing import Text
 
 from .constants import ORIGIN_KEY
 from .constants import SAMPLING_PRIORITY_KEY
+from .constants import SamplingMechanism
+from .constants import UPSTREAM_SERVICES_KEY
 from .internal.compat import NumericType
+from .internal.compat import ensure_binary
+from .internal.compat import ensure_text
 from .internal.logger import get_logger
 from .internal.utils.deprecation import deprecated
 
@@ -73,6 +78,31 @@ class Context(object):
         with self._lock:
             span.meta.update(self._meta)
             span.metrics.update(self._metrics)
+
+    def _update_upstream_services(
+        self,
+        span,  # type: Span
+        sampling_priority,  # type: int
+        sampling_mechanism,  # type: SamplingMechanism
+        sample_rate=None,  # type: Optional[float]
+    ):
+        # type: (...) -> None
+
+        # <base64 service name>|<sampling priority>|<sampling mechanism>|<sample rate>
+        new_entry = "|".join(
+            [
+                ensure_text(base64.b64encode(ensure_binary(span.service or ""))),
+                str(sampling_priority),
+                str(sampling_mechanism.value),
+                "{:0.4f}".format(sample_rate) if sample_rate is not None else "",
+            ]
+        )
+
+        existing = self._meta.get(UPSTREAM_SERVICES_KEY)
+        if existing:
+            self._meta[UPSTREAM_SERVICES_KEY] = ";".join([existing, new_entry])
+        else:
+            self._meta[UPSTREAM_SERVICES_KEY] = new_entry
 
     @property
     def sampling_priority(self):

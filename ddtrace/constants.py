@@ -1,3 +1,6 @@
+import enum
+
+
 FILTERS_KEY = "FILTERS"
 SAMPLE_RATE_METRIC_KEY = "_sample_rate"
 SAMPLING_PRIORITY_KEY = "_sampling_priority_v1"
@@ -20,6 +23,9 @@ NUMERIC_TAGS = (ANALYTICS_SAMPLE_RATE_KEY,)
 MANUAL_DROP_KEY = "manual.drop"
 MANUAL_KEEP_KEY = "manual.keep"
 
+# Horizontally propagated tags
+UPSTREAM_SERVICES_KEY = "_dd.p.upstream_services"
+
 LOG_SPAN_KEY = "__datadog_log_span"
 
 ERROR_MSG = "error.msg"  # a string representing the error message
@@ -36,3 +42,13 @@ AUTO_REJECT = 0
 AUTO_KEEP = 1
 # Use this to explicitly inform the backend that a trace should be kept and stored.
 USER_KEEP = 2
+
+
+class SamplingMechanism(enum.Enum):
+    DEFAULT = 0
+    AGENT = 1
+    REMOTE = 2
+    USER_RULE = 3
+    MANUAL = 4
+    APP_SEC = 5
+    USER_REMOTE = 6
